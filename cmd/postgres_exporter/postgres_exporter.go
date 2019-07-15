@@ -40,7 +40,7 @@ var (
 	onlyDumpMaps           = kingpin.Flag("dumpmaps", "Do not run, simply dump the maps.").Bool()
 	constantLabelsList     = kingpin.Flag("constantLabels", "A list of label=value separated by comma(,).").Default("").Envar("PG_EXPORTER_CONSTANT_LABELS").String()
 	databasesWhitelist     = kingpin.Flag("databases-whitelist", "A list of databases to keep when autoDiscoverDatabases is enabled").Default("").String()
-	databasesBlacklist     = kingpin.Flag("databases-whitelist", "A list of databases to remove when autoDiscoverDatabases is enabled").Default("").String()
+	databasesBlacklist     = kingpin.Flag("databases-blacklist", "A list of databases to remove when autoDiscoverDatabases is enabled").Default("").String()
 )
 
 // Metric name parts.
