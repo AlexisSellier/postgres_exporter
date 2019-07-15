@@ -1310,10 +1310,39 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 }
 
 func (e *Exporter) parseWhitelistDatabases() []string {
-	return strings.Split(e.whitelist, ",")
+	dsns := make(map[string]struct{})
+	whitelist := strings.split(e.whitelist, ",")
+	for _, dsn := range e.dsn {
+		parsedDSN, err := url.Parse(dsn)
+		if err != nil {
+			log.Errorf("Unable to parse DSN (%s): %v", loggableDSN(dsn), err)
+			continue
+		}
+
+		dsns[dsn] = struct{}{}
+		server, err := e.servers.GetServer(dsn)
+		if err != nil {
+			log.Errorf("Error opening connection to database (%s): %v", loggableDSN(dsn), err)
+			continue
+		}
+
+		for _, databaseName := whitelist {
+			parsedDSN.Path = databaseName
+			dsns[parsedDSN.String()] = struct{}{}
+		}
+	}
+
+	result := make([]string, len(dsns))
+	index := 0
+	for dsn := range dsns {
+		result[index] = dsn
+		index++
+	}
+
+	return result
 }
 
-func (e *Exporter) discoverDatabaseDSNs() []string {
+func (e *Exporter) discoverDatabaseDSNs() []string {}
 	dsns := make(map[string]struct{})
 	for _, dsn := range e.dsn {
 		parsedDSN, err := url.Parse(dsn)
@@ -1354,7 +1383,7 @@ func (e *Exporter) discoverDatabaseDSNs() []string {
 	}
 
 	return result
-}
+
 
 func (e *Exporter) scrapeDSN(ch chan<- prometheus.Metric, dsn string) {
 	server, err := e.servers.GetServer(dsn)
