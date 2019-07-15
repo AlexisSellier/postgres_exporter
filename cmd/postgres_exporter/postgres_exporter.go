@@ -39,6 +39,8 @@ var (
 	queriesPath            = kingpin.Flag("extend.query-path", "Path to custom queries to run.").Default("").Envar("PG_EXPORTER_EXTEND_QUERY_PATH").String()
 	onlyDumpMaps           = kingpin.Flag("dumpmaps", "Do not run, simply dump the maps.").Bool()
 	constantLabelsList     = kingpin.Flag("constantLabels", "A list of label=value separated by comma(,).").Default("").Envar("PG_EXPORTER_CONSTANT_LABELS").String()
+	databasesWhitelist     = kingpin.Flag("databases-whitelist", "A list of databases to keep when autoDiscoverDatabases is enabled").Default("").String()
+	databasesBlacklist     = kingpin.Flag("databases-whitelist", "A list of databases to remove when autoDiscoverDatabases is enabled").Default("").String()
 )
 
 // Metric name parts.
@@ -882,7 +884,7 @@ type Exporter struct {
 	builtinMetricMaps map[string]map[string]ColumnMapping
 
 	disableDefaultMetrics, disableSettingsMetrics, autoDiscoverDatabases bool
-
+	whitelist, blacklist string
 	dsn              []string
 	userQueriesPath  string
 	constantLabels   prometheus.Labels
@@ -899,6 +901,18 @@ type Exporter struct {
 
 // ExporterOpt configures Exporter.
 type ExporterOpt func(*Exporter)
+
+func WhitelistDatabases(s string) ExporterOpt {
+	return func(e *Exporter) {
+		e.whitelist = s
+	}
+}
+
+func BlacklistDatabases(s string) ExporterOpt {
+	return func(e *Exporter) {
+		e.blacklist = s
+	}
+}
 
 // DisableDefaultMetrics configures default metrics export.
 func DisableDefaultMetrics(b bool) ExporterOpt {
@@ -1285,12 +1299,18 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 	e.totalScrapes.Inc()
 
 	dsns := e.dsn
-	if e.autoDiscoverDatabases {
+	if e.whitelist != "" {
+		dsns = e.parseWhitelistDatabases()
+	} else if e.autoDiscoverDatabases {
 		dsns = e.discoverDatabaseDSNs()
 	}
 	for _, dsn := range dsns {
 		e.scrapeDSN(ch, dsn)
 	}
+}
+
+func (e *Exporter) parseWhitelistDatabases() []string {
+	return strings.Split(e.whitelist, ",")
 }
 
 func (e *Exporter) discoverDatabaseDSNs() []string {
@@ -1315,6 +1335,12 @@ func (e *Exporter) discoverDatabaseDSNs() []string {
 			continue
 		}
 		for _, databaseName := range databaseNames {
+			if e.blacklist != "" {
+				blacklist := strings.Split(e.blacklist, ",")
+				if Contains(blacklist, databaseName) {
+					continue
+				}
+			}
 			parsedDSN.Path = databaseName
 			dsns[parsedDSN.String()] = struct{}{}
 		}
@@ -1389,6 +1415,15 @@ func getDataSources() []string {
 	return strings.Split(dsn, ",")
 }
 
+func Contains(a []string, x string) bool {
+        for _, n := range a {
+                if x == n {
+                        return true
+                }
+        }
+        return false
+}
+
 func main() {
 	kingpin.Version(fmt.Sprintf("postgres_exporter %s (built with %s)\n", Version, runtime.Version()))
 	log.AddFlags(kingpin.CommandLine)
@@ -1421,6 +1456,8 @@ func main() {
 		AutoDiscoverDatabases(*autoDiscoverDatabases),
 		WithUserQueriesPath(*queriesPath),
 		WithConstantLabels(*constantLabelsList),
+		WhitelistDatabases(*databasesWhitelist),
+		BlacklistDatabases(*databasesBlacklist),
 	)
 	defer func() {
 		exporter.servers.Close()
