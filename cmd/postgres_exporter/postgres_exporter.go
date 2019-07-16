@@ -1317,15 +1317,12 @@ func (e *Exporter) parseWhitelistDatabases() []string {
 		if err != nil {
 			log.Errorf("Unable to parse DSN (%s): %v", loggableDSN(dsn), err)
 			continue
-		}
-		
-		dsns[dsn] = struct{}{}		
+		}		
 		for _, databaseName := range whitelist {
 			parsedDSN.Path = databaseName
 			dsns[parsedDSN.String()] = struct{}{}
 		}
 	}
-	
 	result := make([]string, len(dsns))
 	index := 0
 	for dsn := range dsns {
