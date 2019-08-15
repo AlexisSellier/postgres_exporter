@@ -85,6 +85,17 @@ func (cu *ColumnUsage) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return nil
 }
 
+// QueryScope should be one of several enum vvalues which state when
+// a querid must be executed
+type QueryScope int
+
+// nolint: golint
+const (
+	GLOBAL QueryScope = iota // run the query only for postgres database
+	ALL    QueryScope = iota // run the query for all databases
+	CUSTOM QueryScope = iota // run the query depending on the basase specified by the dataase field
+)
+
 // MappingOptions is a copy of ColumnMapping used only for parsing
 type MappingOptions struct {
 	Usage             string             `yaml:"usage"`
@@ -284,6 +295,7 @@ var builtinMetricMaps = map[string]map[string]ColumnMapping{
 type OverrideQuery struct {
 	versionRange semver.Range
 	query        string
+	scope        QueryScope
 }
 
 // Overriding queries for namespaces above.
