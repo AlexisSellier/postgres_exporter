@@ -91,8 +91,8 @@ type QueryScope int
 
 // nolint: golint
 const (
-	GLOBAL QueryScope = iota // run the query only for postgres database
 	ALL    QueryScope = iota // run the query for all databases
+	GLOBAL QueryScope = iota // run the query only for postgres database (for a futur usage)
 	CUSTOM QueryScope = iota // run the query depending on the basase specified by the dataase field
 )
 
@@ -109,8 +109,10 @@ type Mapping map[string]MappingOptions
 
 // nolint: golint
 type UserQuery struct {
-	Query   string    `yaml:"query"`
-	Metrics []Mapping `yaml:"metrics"`
+	Query     string    `yaml:"query"`
+	Metrics   []Mapping `yaml:"metrics"`
+	Scope     string    `yaml:"scope"`
+	Databases string    `yaml:"databases"`
 }
 
 // nolint: golint
@@ -296,6 +298,7 @@ type OverrideQuery struct {
 	versionRange semver.Range
 	query        string
 	scope        QueryScope
+	databases    []string
 }
 
 // Overriding queries for namespaces above.
@@ -303,8 +306,8 @@ type OverrideQuery struct {
 var queryOverrides = map[string][]OverrideQuery{
 	"pg_locks": {
 		{
-			semver.MustParseRange(">0.0.0"),
-			`SELECT pg_database.datname,tmp.mode,COALESCE(count,0) as count
+			versionRange: semver.MustParseRange(">0.0.0"),
+			query: `SELECT pg_database.datname,tmp.mode,COALESCE(count,0) as count
 			FROM
 				(
 				  VALUES ('accesssharelock'),
@@ -327,27 +330,24 @@ var queryOverrides = map[string][]OverrideQuery{
 
 	"pg_stat_replication": {
 		{
-			semver.MustParseRange(">=10.0.0"),
-			`
-			SELECT *,
+			versionRange: semver.MustParseRange(">=10.0.0"),
+			query: `SELECT *,
 				(case pg_is_in_recovery() when 't' then null else pg_current_wal_lsn() end) AS pg_current_wal_lsn,
 				(case pg_is_in_recovery() when 't' then null else pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::float end) AS pg_wal_lsn_diff
 			FROM pg_stat_replication
 			`,
 		},
 		{
-			semver.MustParseRange(">=9.2.0 <10.0.0"),
-			`
-			SELECT *,
+			versionRange: semver.MustParseRange(">=9.2.0 <10.0.0"),
+			query: `SELECT *,
 				(case pg_is_in_recovery() when 't' then null else pg_current_xlog_location() end) AS pg_current_xlog_location,
 				(case pg_is_in_recovery() when 't' then null else pg_xlog_location_diff(pg_current_xlog_location(), replay_location)::float end) AS pg_xlog_location_diff
 			FROM pg_stat_replication
 			`,
 		},
 		{
-			semver.MustParseRange("<9.2.0"),
-			`
-			SELECT *,
+			versionRange: semver.MustParseRange("<9.2.0"),
+			query: `SELECT *,
 				(case pg_is_in_recovery() when 't' then null else pg_current_xlog_location() end) AS pg_current_xlog_location
 			FROM pg_stat_replication
 			`,
@@ -357,9 +357,8 @@ var queryOverrides = map[string][]OverrideQuery{
 	"pg_stat_activity": {
 		// This query only works
 		{
-			semver.MustParseRange(">=9.2.0"),
-			`
-			SELECT
+			versionRange: semver.MustParseRange(">=9.2.0"),
+			query: `SELECT
 				pg_database.datname,
 				tmp.state,
 				COALESCE(count,0) as count,
@@ -385,9 +384,8 @@ var queryOverrides = map[string][]OverrideQuery{
 			`,
 		},
 		{
-			semver.MustParseRange("<9.2.0"),
-			`
-			SELECT
+			versionRange: semver.MustParseRange("<9.2.0"),
+			query: `SELECT
 				datname,
 				'unknown' AS state,
 				COALESCE(count(*),0) AS count,
@@ -400,29 +398,31 @@ var queryOverrides = map[string][]OverrideQuery{
 
 // Convert the query override file to the version-specific query override file
 // for the exporter.
-func makeQueryOverrideMap(pgVersion semver.Version, queryOverrides map[string][]OverrideQuery) map[string]string {
-	resultMap := make(map[string]string)
+func makeQueryOverrideMap(pgVersion semver.Version, queryOverrides map[string][]OverrideQuery) map[string]OverrideQuery {
+	resultMap := make(map[string]OverrideQuery)
 	for name, overrideDef := range queryOverrides {
 		// Find a matching semver. We make it an error to have overlapping
 		// ranges at test-time, so only 1 should ever match.
 		matched := false
 		for _, queryDef := range overrideDef {
 			if queryDef.versionRange(pgVersion) {
-				resultMap[name] = queryDef.query
+				resultMap[name] = OverrideQuery{
+					query: queryDef.query,
+				}
 				matched = true
 				break
 			}
 		}
 		if !matched {
 			log.Warnln("No query matched override for", name, "- disabling metric space.")
-			resultMap[name] = ""
+			resultMap[name] = OverrideQuery{}
 		}
 	}
 
 	return resultMap
 }
 
-func parseUserQueries(content []byte) (map[string]map[string]ColumnMapping, map[string]string, error) {
+func parseUserQueries(content []byte) (map[string]map[string]ColumnMapping, map[string]OverrideQuery, error) {
 	var userQueries UserQueries
 
 	err := yaml.Unmarshal(content, &userQueries)
@@ -432,11 +432,22 @@ func parseUserQueries(content []byte) (map[string]map[string]ColumnMapping, map[
 
 	// Stores the loaded map representation
 	metricMaps := make(map[string]map[string]ColumnMapping)
-	newQueryOverrides := make(map[string]string)
+	newQueryOverrides := make(map[string]OverrideQuery)
 
 	for metric, specs := range userQueries {
 		log.Debugln("New user metric namespace from YAML:", metric)
-		newQueryOverrides[metric] = specs.Query
+
+		// By default, considere query scope to ALL
+		scope := ALL
+		if specs.Scope == "custom" {
+			scope = CUSTOM
+		}
+
+		newQueryOverrides[metric] = OverrideQuery{
+			query:     specs.Query,
+			scope:     scope,
+			databases: strings.Split(specs.Databases, ","),
+		}
 		metricMap, ok := metricMaps[metric]
 		if !ok {
 			// Namespace for metric not found - add it.
@@ -496,7 +507,11 @@ func addQueries(content []byte, pgVersion semver.Version, server *Server) error 
 		} else {
 			log.Debugln("Adding new query override", k, "from user YAML file.")
 		}
-		server.queryOverrides[k] = v
+		server.queryOverrides[k] = OverrideQuery{
+			query:     v.query,
+			scope:     v.scope,
+			databases: v.databases,
+		}
 	}
 	return nil
 }
@@ -766,7 +781,7 @@ type Server struct {
 	// Currently active metric map
 	metricMap map[string]MetricMapNamespace
 	// Currently active query overrides
-	queryOverrides map[string]string
+	queryOverrides map[string]OverrideQuery
 	mappingMtx     sync.RWMutex
 }
 
@@ -834,7 +849,7 @@ func (s *Server) String() string {
 }
 
 // Scrape loads metrics.
-func (s *Server) Scrape(ch chan<- prometheus.Metric, disableSettingsMetrics bool) error {
+func (s *Server) Scrape(ch chan<- prometheus.Metric, disableSettingsMetrics bool, dbname string) error {
 	s.mappingMtx.RLock()
 	defer s.mappingMtx.RUnlock()
 
@@ -846,7 +861,7 @@ func (s *Server) Scrape(ch chan<- prometheus.Metric, disableSettingsMetrics bool
 		}
 	}
 
-	errMap := queryNamespaceMappings(ch, s)
+	errMap := queryNamespaceMappings(ch, s, dbname)
 	if len(errMap) > 0 {
 		err = fmt.Errorf("queryNamespaceMappings returned %d errors", len(errMap))
 	}
@@ -1119,17 +1134,21 @@ func queryDatabases(server *Server) ([]string, error) {
 
 // Query within a namespace mapping and emit metrics. Returns fatal errors if
 // the scrape fails, and a slice of errors if they were non-fatal.
-func queryNamespaceMapping(ch chan<- prometheus.Metric, server *Server, namespace string, mapping MetricMapNamespace) ([]error, error) {
+func queryNamespaceMapping(ch chan<- prometheus.Metric, server *Server, namespace string, mapping MetricMapNamespace, dbname string) ([]error, error) {
 	// Check for a query override for this namespace
 	query, found := server.queryOverrides[namespace]
 
 	// Was this query disabled (i.e. nothing sensible can be queried on cu
 	// version of PostgreSQL?
-	if query == "" && found {
+	if found && query.query == "" {
 		// Return success (no pertinent data)
 		return []error{}, nil
 	}
 
+	// Was this query not supposed to be executed on this database ?
+	if found && query.scope == CUSTOM && !contains(query.databases, dbname) {
+		return []error{}, nil
+	}
 	// Don't fail on a bad scrape of one metric
 	var rows *sql.Rows
 	var err error
@@ -1139,7 +1158,7 @@ func queryNamespaceMapping(ch chan<- prometheus.Metric, server *Server, namespac
 		// an admin tool so you're not injecting SQL right?
 		rows, err = server.db.Query(fmt.Sprintf("SELECT * FROM %s;", namespace)) // nolint: gas, safesql
 	} else {
-		rows, err = server.db.Query(query) // nolint: safesql
+		rows, err = server.db.Query(query.query) // nolint: safesql
 	}
 	if err != nil {
 		return []error{}, fmt.Errorf("Error running query on database %q: %s %v", server, namespace, err)
@@ -1217,13 +1236,13 @@ func queryNamespaceMapping(ch chan<- prometheus.Metric, server *Server, namespac
 
 // Iterate through all the namespace mappings in the exporter and run their
 // queries.
-func queryNamespaceMappings(ch chan<- prometheus.Metric, server *Server) map[string]error {
+func queryNamespaceMappings(ch chan<- prometheus.Metric, server *Server, dbname string) map[string]error {
 	// Return a map of namespace -> errors
 	namespaceErrors := make(map[string]error)
 
 	for namespace, mapping := range server.metricMap {
 		log.Debugln("Querying namespace: ", namespace)
-		nonFatalErrors, err := queryNamespaceMapping(ch, server, namespace, mapping)
+		nonFatalErrors, err := queryNamespaceMapping(ch, server, namespace, mapping, dbname)
 		// Serious error - a namespace disappeared
 		if err != nil {
 			namespaceErrors[namespace] = err
@@ -1264,7 +1283,7 @@ func (e *Exporter) checkMapVersions(ch chan<- prometheus.Metric, server *Server)
 
 		if e.disableDefaultMetrics {
 			server.metricMap = make(map[string]MetricMapNamespace)
-			server.queryOverrides = make(map[string]string)
+			server.queryOverrides = make(map[string]OverrideQuery)
 		} else {
 			server.metricMap = makeDescMap(semanticVersion, server.labels, e.builtinMetricMaps)
 			server.queryOverrides = makeQueryOverrideMap(semanticVersion, queryOverrides)
@@ -1400,8 +1419,8 @@ func (e *Exporter) scrapeDSN(ch chan<- prometheus.Metric, dsn string) error {
 	if err := e.checkMapVersions(ch, server); err != nil {
 		log.Warnln("Proceeding with outdated query maps, as the Postgres version could not be determined:", err)
 	}
-
-	return server.Scrape(ch, e.disableSettingsMetrics)
+	parsedDSN, _ := url.Parse(dsn)
+	return server.Scrape(ch, e.disableSettingsMetrics, parsedDSN.Path)
 }
 
 // try to get the DataSource

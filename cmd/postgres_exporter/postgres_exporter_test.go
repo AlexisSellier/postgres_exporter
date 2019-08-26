@@ -316,3 +316,22 @@ func (s *FunctionalSuite) TestParseUserQueries(c *C) {
 		}
 	}
 }
+
+func (s *FunctionalSuite) TestParseScopedUser(c *C) {
+	scopedUserQueriesData, err := ioutil.ReadFile("./tests/scoped_user_queries.yaml")
+	if err == nil {
+		metricMaps, newQueryOverrides, err := parseUserQueries(scopedUserQueriesData)
+		c.Assert(err, Equals, nil)
+		c.Assert(metricMaps, NotNil)
+		c.Assert(newQueryOverrides, NotNil)
+
+		if len(metricMaps) != 2 {
+			c.Errorf("Expected 2 metrics from user file, got %d", len(metricMaps))
+		}
+		query, ok := newQueryOverrides["pg_locks_mode"]
+		if !ok {
+			c.Fatal("Excepted pg_locks_mode metrics to be present")
+		}
+		c.Assert(query.scope, Equals, CUSTOM)
+	}
+}
